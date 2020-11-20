@@ -1,0 +1,231 @@
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from tensorflow.keras import models, layers, losses, metrics, callbacks, Sequential, optimizers
+import os
+
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+# Please note that this code is derived from an unpublished paper, so it is for reviewers only, that is, only reviewers can get the password of the dataset, but the code is public to everyone.
+# If the paper is accepted, we will publish the data set. Everyone is welcome to read the paper and use our code and data.
+
+# Paper Portal: However, not publish.
+# Author:      Hongyu Sun
+# Affiliation: Tsinghua University
+# Email:     sunhy18@mails.tsinghua.edu.cn
+
+# --------------------
+TRAIN_dataset_path = 'train_dataset.csv' # The absolute path of the input dataset, follows do the same
+TEST_dataset_path  = 'test_dataset.csv'
+SAVE_PATH = 'Multiout_Quant.h5'
+SAVING = 'N' # Save 'Y' or drop 'N'
+PRINT_NUMBER = 320 # Indicates how many results from the test set to display
+EPOCHS = 150
+LEARNING_RATE = 0.0001
+# --------------------
+
+def get_data(file_path, shuffle_number=1000, batch_number=100):
+
+    data_read = pd.read_csv(file_path, header=None) # Prevent the first line from being a header
+    data_X = data_read.values[:, 6:6567] # Read X-axis measurement data
+    data_X_2D = tf.reshape(data_X, shape=[-1, 81, 81]) # 2D
+    data_Y = data_read.values[:, 6567:13128]  # Read Y-axis measurement data
+    data_Y_2D = tf.reshape(data_Y, shape=[-1, 81, 81]) # 2D
+    data_Z = data_read.values[:, 13128:19689]  # Read Z-axis measurement data
+    data_Z_2D = tf.reshape(data_Z, shape=[-1, 81, 81]) # 2D
+
+    data_2D = tf.stack([data_X_2D, data_Y_2D, data_Z_2D], axis=3)
+
+    label_L = []
+    label_W = []
+    label_D = []
+
+    for i in data_read.values[:, 1:2]:
+        for j in i:
+            label_L.append(j)
+    for i in data_read.values[:, 2:3]:
+        for j in i:
+            label_W.append(j)
+    for i in data_read.values[:, 3:4]:
+        for j in i:
+            label_D.append(j)
+
+    data_2D = tf.cast(data_2D, dtype=tf.float32)
+    label_L = tf.cast(label_L, dtype=tf.int32)
+    label_W = tf.cast(label_W, dtype=tf.int32)
+    label_D = tf.cast(label_D, dtype=tf.int32)
+
+    data_base = tf.data.Dataset.from_tensor_slices(
+        (data_2D, (label_L, label_W, label_D))
+    ).batch(batch_number, drop_remainder=True).shuffle(shuffle_number)
+
+    return data_base
+
+def compare(file_path = None, number = PRINT_NUMBER):
+
+    data_read = pd.read_csv(filepath_or_buffer=file_path, header=None)
+
+    data_X = data_read.values[:, 6:6567]
+    data_X_2D = tf.reshape(data_X, shape=[-1, 81, 81])
+    data_Y = data_read.values[:, 6567:13128]
+    data_Y_2D = tf.reshape(data_Y, shape=[-1, 81, 81])
+    data_Z = data_read.values[:, 13128:19689]
+    data_Z_2D = tf.reshape(data_Z, shape=[-1, 81, 81])
+
+    data_2D = tf.stack([data_X_2D, data_Y_2D, data_Z_2D], axis=3)
+
+    label_L = data_read.values[:, 1:2][0:number]
+    label_W = data_read.values[:, 2:3][0:number]
+    label_D = data_read.values[:, 3:4][0:number]
+
+    data_2D = tf.cast(data_2D[0:number], tf.float32)
+    data_2D = tf.reshape(data_2D, [number, 81, 81, 3])
+
+    return data_2D, label_L,  label_W, label_D
+
+def main():
+
+    train_db = get_data(file_path=TRAIN_dataset_path)
+    test_db = get_data(file_path=TEST_dataset_path)
+
+    # ———————————————————————————————————————————— Network structure begins ————————————————————————————————————————————
+
+    inputs = layers.Input(shape=(81, 81, 3)) # 0
+    init_1 = layers.Conv2D(3, 3, padding='same', activation='relu')(inputs)
+    init_2 = layers.MaxPooling2D(2, strides=2, padding='same')(init_1)
+    init_end = layers.BatchNormalization()(init_2) # 3
+
+    template = tf.zeros(shape=[3, 3, 3, 3], dtype=tf.float32)
+
+    length_matrix = tf.constant([
+        [-1.,-2.,-1.],
+        [ 0., 0., 0.],
+        [ 1., 2., 1.]
+    ], dtype=tf.float32) + template
+
+    width_matrix = tf.constant([
+        [-1., 0., 1.],
+        [-2., 0., 2.],
+        [-1., 0., 1.]
+    ], dtype=tf.float32) + template
+
+    branch_length_1 = tf.nn.conv2d(init_end, length_matrix, strides=[1, 1, 1, 1], padding='SAME')
+    branch_width_1 = tf.nn.conv2d(init_end, width_matrix, strides=[1, 1, 1, 1], padding='SAME')
+
+
+    branch_length_2 = layers.Conv2D(64, 3, padding='same', activation='relu')(branch_length_1) # 6
+    branch_width_2 = layers.Conv2D(64, 3, padding='same', activation='relu')(branch_width_1)
+    branch_length_3 = layers.MaxPooling2D(2, strides=2, padding='same')(branch_length_2)
+    branch_width_3 = layers.MaxPooling2D(2, strides=2, padding='same')(branch_width_2)
+    branch_length_3_mid = layers.add([branch_length_3, branch_width_3]) # 10
+    branch_width_3_mid = layers.add([branch_width_3, branch_length_3])
+    branch_length_4 = layers.Conv2D(64, 3, padding='same', activation='relu')(branch_length_3_mid)
+    branch_width_4 = layers.Conv2D(64, 3, padding='same', activation='relu')(branch_width_3_mid)
+    branch_length_5 = layers.MaxPooling2D(2, strides=2, padding='same')(branch_length_4)
+    branch_width_5 = layers.MaxPooling2D(2, strides=2, padding='same')(branch_width_4) # 15
+    branch_length_end = layers.BatchNormalization()(branch_length_5)
+    branch_width_end = layers.BatchNormalization()(branch_width_5)
+
+    concat = layers.Concatenate()([branch_length_end, branch_width_end])
+
+    main_1 = layers.Conv2D(128, 3, padding='same', activation='relu')(concat)
+    main_2 = layers.MaxPooling2D(2, strides=2, padding='same')(main_1) # 20
+    main_3 = layers.Conv2D(128, 3, padding='same', activation='relu')(main_2)
+    main_4 = layers.MaxPooling2D(2, strides=2, padding='same')(main_3)
+    main_end = layers.BatchNormalization()(main_4)
+
+    # Fully connected
+    # L prediction
+    main_L_1 = layers.Flatten()(branch_length_end)
+    main_L_2 = layers.Dense(128, activation='relu')(main_L_1)
+    main_L_3 = layers.Dense(32, activation='relu')(main_L_2)
+    outputs_L = layers.Dense(1)(main_L_3)
+    # W prediction
+    main_W_1 = layers.Flatten()(branch_width_end)
+    main_W_2 = layers.Dense(128, activation='relu')(main_W_1)
+    main_W_3 = layers.Dense(32, activation='relu')(main_W_2)
+    outputs_W = layers.Dense(1)(main_W_3)
+    # D prediction
+    main_D_1 = layers.Flatten()(main_end)
+    main_D_2 = layers.Dense(128, activation='relu')(main_D_1)
+    main_D_3 = layers.Dense(32, activation='relu')(main_D_2)
+    outputs_D = layers.Dense(1)(main_D_3)
+
+    # ———————————————————————————————————————————— End of network structure ————————————————————————————————————————————
+
+    model = models.Model(inputs=inputs, outputs=[outputs_L, outputs_W, outputs_D])
+    model.summary()
+
+    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
+        monitor='val_loss',
+        patience=10,
+        verbose=1,  # 0 does not prompt the current learning rate, 1 prompt
+        factor=0.5,
+        min_lr=0.00001,
+        min_delta=0.001
+    )
+    early_st = tf.keras.callbacks.EarlyStopping(
+        monitor='val_loss',
+        verbose=1,
+        min_delta=0.001,  # Minimum increase
+        patience=20,
+        restore_best_weights=True  # Keep optimal weight value
+    )
+
+    model.compile(optimizer=optimizers.Nadam(LEARNING_RATE), loss=['mse','mse','mse'], metrics=['mse'])
+    History = model.fit(train_db, validation_data=test_db, epochs=EPOCHS, validation_freq=1, callbacks=[reduce_lr, early_st])
+
+    if SAVING == 'Y':
+        model.save(filepath=SAVE_PATH)
+        print('-------------------- \nModel saved successfully !\n')
+
+    print('后处理中...')
+    train_data, train_label_L, train_label_W, train_label_D = compare(file_path=TRAIN_dataset_path, number=PRINT_NUMBER)
+    train_result = model.predict(train_data)
+
+    test_data, test_label_L, test_label_W, test_label_D = compare(file_path=TEST_dataset_path, number=PRINT_NUMBER)
+    test_result = model.predict(test_data)
+
+    print('---train---')
+    train_total_L = 0
+    train_total_W = 0
+    train_total_D = 0
+    for j in range(PRINT_NUMBER):
+        print('L', float(train_result[0][j]), '-', train_label_L[j], 'distance:', float(abs(train_result[0][j] - train_label_L[j])))
+        train_total_L += float(abs(train_result[0][j] - train_label_L[j]))
+        print('W', float(train_result[1][j]), '-', train_label_W[j], 'distance:', float(abs(train_result[1][j] - train_label_W[j])))
+        train_total_W += float(abs(train_result[1][j] - train_label_W[j]))
+        print('D', float(train_result[2][j]), '-', train_label_D[j], 'distance:', float(abs(train_result[2][j] - train_label_D[j])))
+        train_total_D += float(abs(train_result[2][j] - train_label_D[j]))
+    train_total = train_total_L + train_total_W + train_total_D
+
+    print('---test---')
+    test_total_L = 0
+    test_total_W = 0
+    test_total_D = 0
+    for j in range(PRINT_NUMBER):
+        print('L', float(test_result[0][j]), '-', test_label_L[j], 'distance:', float(abs(test_result[0][j] - test_label_L[j])))
+        test_total_L += float(abs(test_result[0][j] - test_label_L[j]))
+        print('W', float(test_result[1][j]), '-', test_label_W[j], 'distance:', float(abs(test_result[1][j] - test_label_W[j])))
+        test_total_W += float(abs(test_result[1][j] - test_label_W[j]))
+        print('D', float(test_result[2][j]), '-', test_label_D[j], 'distance:', float(abs(test_result[2][j] - test_label_D[j])))
+        test_total_D += float(abs(test_result[2][j] - test_label_D[j]))
+    test_total = test_total_L + test_total_W + test_total_D
+
+    print('Training set length error(mm)：', train_total_L / PRINT_NUMBER)
+    print('Test set length error(mm)：', test_total_L  / PRINT_NUMBER)
+
+    print('Training set width error(mm)：', train_total_W / PRINT_NUMBER)
+    print('Test set width error(mm)：', test_total_W  / PRINT_NUMBER)
+
+    print('Training set depth error(%)：', train_total_D / PRINT_NUMBER)
+    print('Test set depth error(%)：', test_total_D  / PRINT_NUMBER)
+
+    print('--------------------------------')
+    print('Average error of training set：', train_total   / (PRINT_NUMBER * 3))
+    print('Average error of test set：', test_total    / (PRINT_NUMBER * 3))
+
+if __name__ == '__main__':
+    main()
+
+

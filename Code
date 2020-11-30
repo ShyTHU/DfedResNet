@@ -179,7 +179,7 @@ def main():
         model.save(filepath=SAVE_PATH)
         print('-------------------- \nModel saved successfully !\n')
 
-    print('后处理中...')
+    print('Post-processing...')
     train_data, train_label_L, train_label_W, train_label_D = compare(file_path=TRAIN_dataset_path, number=PRINT_NUMBER)
     train_result = model.predict(train_data)
 

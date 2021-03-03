@@ -225,6 +225,7 @@ def main():
     print('Average error of training set：', train_total   / (PRINT_NUMBER * 3))
     print('Average error of test set：', test_total    / (PRINT_NUMBER * 3))
 
+
 if __name__ == '__main__':
     main()
 
